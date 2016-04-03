@@ -1,6 +1,7 @@
 #include "WPILib.h"
 #include "ADIS16448_IMU.h"
 #include "PracticalSocket.h"
+#include "AHRS.h"
 
 /**
  * This is a demo program showing the use of the RobotDrive class.
@@ -33,11 +34,14 @@ class Robot: public SampleRobot
 		STOP,
 		INITFORWARD,
 		FOUNDRAMP,
-		DRIVENBACK,
 		ONDEFENSE,
 		PASSEDDEFENSE,
-		SECONDFORWARD,
+		CORRECTINGANGLE,
+		BACKWARD,
 		FINISHED,
+
+		SECONDFORWARD,
+		DRIVENBACK,
 	};
 
 	//RobotDrive myRobot; // robot drive system
@@ -58,10 +62,20 @@ class Robot: public SampleRobot
 	float xPosition;
 	float yPosition;
 
+	bool reverseForward = false;
+
+	float deadZone = 0.1;
+	float joyScale = 1.0 - deadZone;
+	float minTurnPower = 0.2;
+	float turnScale = 1.0 - minTurnPower;
+	float turnSlope = turnScale / joyScale;
+	float verticalShift = minTurnPower - turnSlope * deadZone;
+
 	Joystick *joystickMain;
 	Joystick *joystickSecond;
 
 	ADIS16448_IMU *imu;
+	AHRS *ahrs;
 
 	DoubleSolenoid *shooterA;
 	DoubleSolenoid *shooterB;
@@ -75,7 +89,7 @@ class Robot: public SampleRobot
 	bool teleopInit;
 	bool pidInit;
 
-	float initialY, initialZ, timeInitial;
+	float initialY, initialZ, timeInitial, timeInitial2;
 	int timesAuto;
 	float timeReceive;
 
@@ -129,6 +143,7 @@ public:
 		drive = new RobotDrive(leftMotorF, leftMotorB, rightMotorF, rightMotorB);
 
 		imu = new ADIS16448_IMU();
+		ahrs = new AHRS(SPI::Port::kMXP);
 
 		shooterA = new DoubleSolenoid(0, 1);
 		shooterB = new DoubleSolenoid(2, 3);
@@ -211,6 +226,7 @@ public:
 
 	void autonomousInit() {
 		timeInitial = Timer::GetFPGATimestamp();
+		timeInitial2 = 0;
 
 		leftMotorF->SetEncPosition(0);
 		rightMotorF->SetEncPosition(0);
@@ -287,14 +303,14 @@ public:
 		while (IsAutonomous()) {
 			if (IsEnabled()) {
 				resetMotors();
-				SmartDashboard::PutNumber("AngleX", imu->GetAngleX());
-				SmartDashboard::PutNumber("AngleY", imu->GetAngleY());
-				SmartDashboard::PutNumber("AngleZ", imu->GetAngleZ());
-				SmartDashboard::PutNumber("Left P", leftMotorF->GetP());
-				SmartDashboard::PutNumber("Left I",leftMotorF->GetI());
-				SmartDashboard::PutNumber("Left D", leftMotorF->GetD());
-				SmartDashboard::PutNumber("Left Encoder", leftMotorF->GetEncPosition());
-				SmartDashboard::PutNumber("Right Encoder", rightMotorF->GetEncPosition());
+				//SmartDashboard::PutNumber("AngleX", imu->GetAngleX());
+				//SmartDashboard::PutNumber("AngleY", imu->GetAngleY());
+				//SmartDashboard::PutNumber("AngleZ", imu->GetAngleZ());
+				//SmartDashboard::PutNumber("Left P", leftMotorF->GetP());
+				//SmartDashboard::PutNumber("Left I",leftMotorF->GetI());
+				//SmartDashboard::PutNumber("Left D", leftMotorF->GetD());
+				//SmartDashboard::PutNumber("Left Encoder", leftMotorF->GetEncPosition());
+				//SmartDashboard::PutNumber("Right Encoder", rightMotorF->GetEncPosition());
 				SmartDashboard::PutNumber("Left Speed", leftMotorF->GetSpeed());
 				//SmartDashboard::PutNumber("Left Ultra", frontL->GetRangeInches());
 				//SmartDashboard::PutNumber("Right Ultra", frontR->GetRangeInches());
@@ -306,10 +322,72 @@ public:
 					autoInit = true;
 					autonomousInit();
 					autoState = INITFORWARD;
+					if (autoSelected == autoNothing)
+						DriverStation::ReportError("Auto Nothing");
+					else if (autoSelected == autoLowBar) {
+						shooterA->Set(DoubleSolenoid::kForward);
+						shooterB->Set(DoubleSolenoid::kForward);
+						//wasDown=true;
+						DriverStation::ReportError("Auto Low Bar");
+					} else if (autoSelected == autoRoughTerrain)
+						DriverStation::ReportError("Auto Rough Terrain");
+					else if (autoSelected == autoRamparts)
+						DriverStation::ReportError("Auto Ramparts");
 				}
-				if (autoSelected == autoNothing) {
-					autoState = FINISHED;
-				} else if (autoSelected == autoLowBar) {
+				if (autoState != STOP) {
+					if (autoSelected == autoNothing) {
+						autoState = STOP;
+					} else if (autoSelected == autoLowBar) {
+						if (autoState == INITFORWARD) {
+							if (timeInitial + 1.5 > Timer::GetFPGATimestamp()) {
+								drive->ArcadeDrive(0.5, 0);
+								if (ahrs->GetRoll() < -6) {
+									autoState = FOUNDRAMP;
+									timeInitial = Timer::GetFPGATimestamp();
+								}
+							} else {
+								autoState = STOP
+										DriverStation::ReportWarning("Aborting autonomous; didn't detect ramp");
+							}
+						} else if (autoState == FOUNDRAMP) {
+							// driving over defense
+							if (timeInitial + 0.75 > Timer::GetFPGATimestamp()) {
+								drive->ArcadeDrive(1.0, 0);
+							} else {
+								if (abs(ahrs->GetRoll()) < 3) {
+									// found ground
+									autoState = CORRECTINGANGLE;
+									timeInitial = Timer::GetFPGATimestamp();
+								} else {
+									// needs extra forward to find ground
+									autoState = ONDEFENSE;
+									timeInitial = Timer::GetFPGATimestamp();
+								}
+							}
+						} else if (autoState == ONDEFENSE) {
+							drive->ArcadeDrive(0.75, 0);
+							autoState = STOP;
+							DriverStation::ReportWarning("Aborting autonomous; didn't detect passing defense");
+						} else if (autoState == CORRECTINGANGLE) {
+
+						}
+						/*
+					if (autoState == INITFORWARD) {
+						if (timeInitial + 2 > Timer::GetFPGATimestamp()) {
+							timeInitial2 = Timer::GetFPGATimestamp();
+						} else if (timeInitial2 + 5 > Timer::GetFPGATimestamp()) {
+							drive->ArcadeDrive(0.55, 0);
+						} else {
+							DriverStation::ReportError("Auto Done");
+							autoState = STOP;
+						}
+					} else {
+						timeInitial = 0;
+						timeInitial2 = 0;
+						drive->ArcadeDrive(0.0, 0.0);
+					}
+
+					/*
 					if (timeInitial + 8 > Timer::GetFPGATimestamp()) {
 						double distance = convertToInches(ultra->GetVoltage());
 						if (distance > 15 && distance < 30 && timesAuto < 3) {
@@ -324,7 +402,124 @@ public:
 						autoState = STOP;
 						DriverStation::ReportError("Didn't find wall; aborting autonomous");
 					}
-					/*
+						 */
+
+						/*
+					// good PID's are 0.1, 0, 14.35
+					if (autoState == INITFORWARD && imu->GetAngleY() - initialY < 2.5) {
+
+						if (timeInitial + 4 > Timer::GetFPGATimestamp()) {
+							drive->ArcadeDrive(0.45, 0);
+						} else {
+							DriverStation::ReportError("Couldn't find defense's ramp; aborting autonomous");
+							autoState = STOP;
+						}
+
+					} else if (autoState == INITFORWARD && imu->GetAngleY() - initialY > 2.5) {
+						autoState = FOUNDRAMP;
+						DriverStation::ReportError("Found Ramp");
+						timeInitial = Timer::GetFPGATimestamp();
+					} else if (autoState == FOUNDRAMP) {
+						/*
+						if (driveDistance(5000, 0.1, 0, 14.35) == true) {
+							// finished driving distance
+							autoState = DRIVENBACK;
+							DriverStation::ReportError("Finished Back");
+
+							leftMotorF->SetControlMode(CANSpeedController::kPercentVbus);
+							rightMotorF->SetControlMode(CANSpeedController::kPercentVbus);
+
+							resetMotors();
+							timeInitial = Timer::GetFPGATimestamp();
+						} else {
+							// do nothing - continue driving
+						}
+
+						if (timeInitial + 2 > Timer::GetFPGATimestamp()) {
+							drive->ArcadeDrive(-0.45, 0);
+						} else {
+							DriverStation::ReportError("Finished driving back");
+							timeInitial = Timer::GetFPGATimestamp();
+						}
+					} else if (autoState == DRIVENBACK) {
+						if (timeInitial + 4 > Timer::GetFPGATimestamp())
+							drive->ArcadeDrive(0.7, 0.0);
+						else {
+							autoState = STOP;
+						}
+						/*
+						else if (timeInitial + 1.25 > Timer::GetFPGATimestamp()) {
+							//autoState = ONDEFENSE;
+							timeInitial = Timer::GetFPGATimestamp();
+							drive->ArcadeDrive(0.7, 0.0);
+						} else {
+							DriverStation::ReportError("Didn't find angle from being on top of defense; aborting autonomous");
+							autoState = STOP;
+						}
+
+					}  else if (autoState == ONDEFENSE) {
+						if (timeInitial + 1.25 > Timer::GetFPGATimestamp()) {
+							if (abs(imu->GetAngleY() - initialY) < 2.5) {
+								autoState = PASSEDDEFENSE;
+							} else {
+								drive->ArcadeDrive(0.7, 0);
+							}
+						} else {
+							autoState = STOP;
+							DriverStation::ReportError("Didn't find loss of angle from passing defense; aborting autonomous");
+						}
+					} else if (autoState == PASSEDDEFENSE) {
+
+						if (timeInitial + 2.5 > Timer::GetFPGATimestamp()) {
+							double distance = convertToInches(ultra2->GetVoltage());
+							if (distance > 15 && distance < 30 && timesAuto < 3) {
+								timesAuto++;
+							} else if (distance > 15 && distance < 30 && timesAuto >= 3) {
+								autoState = STOP;
+								DriverStation::ReportError("Found wall");
+							} else {
+								drive->ArcadeDrive(0.45, 0);
+							}
+						} else {
+							autoState = STOP;
+							DriverStation::ReportError("Didn't find wall; aborting autonomous");
+						}
+
+					}  else if (autoState == STOP) {
+						initialY = 0;
+						timeInitial = 0;
+						drive->ArcadeDrive(0.0, 0.0);
+					}*/
+					} else {
+						if (timeInitial + 1.5 > Timer::GetFPGATimestamp()) {
+							drive->ArcadeDrive(1.0, 0);
+						} else {
+							DriverStation::ReportError("Auto Done");
+							autoState = STOP;
+							timeInitial = 0;
+							timeInitial2 = 0;
+							drive->ArcadeDrive(0.0, 0.0);
+						}
+					}
+				}
+				/*else if (autoSelected == autoRoughTerrain) {
+
+					if (timeInitial + 8 > Timer::GetFPGATimestamp()) {
+						double distance = convertToInches(ultra->GetVoltage());
+						if (distance > 15 && distance < 30 && timesAuto < 3) {
+							timesAuto++;
+						} else if (distance > 15 && distance < 30 && timesAuto >= 3) {
+							autoState = STOP;
+							DriverStation::ReportError("Found wall");
+						} else {
+							drive->ArcadeDrive(0.45, 0);
+						}
+					} else {
+						autoState = STOP;
+						DriverStation::ReportError("Didn't find wall; aborting autonomous");
+					}
+
+
 					// good PID's are 0.1, 0, 14.35
 					if (autoState == INITFORWARD && imu->GetAngleY() - initialY < 2.5) {
 
@@ -355,25 +550,29 @@ public:
 							// do nothing - continue driving
 						}
 
-						if (timeInitial + 1 > Timer::GetFPGATimestamp()) {
+						if (timeInitial + 2 > Timer::GetFPGATimestamp()) {
 							drive->ArcadeDrive(-0.45, 0);
 						} else {
 							DriverStation::ReportError("Finished driving back");
+							timeInitial = Timer::GetFPGATimestamp();
 						}
 					} else if (autoState == DRIVENBACK) {
-						DriverStation::ReportError("Driving over defense");
+						if (timeInitial + 4 > Timer::GetFPGATimestamp())
+							drive->ArcadeDrive(0.85, 0.0);
+						else {
+							autoState = STOP;
+						}
 
-						if (timeInitial + 1.25 > Timer::GetFPGATimestamp() &&  imu->GetAngleY() - initialY < 2.5)
-							drive->ArcadeDrive(0.7, 0.0);
-						else if (timeInitial + 1.25 > Timer::GetFPGATimestamp() &&  imu->GetAngleY() - initialY > 2.5) {
-							autoState = ONDEFENSE;
+						else if (timeInitial + 1.25 > Timer::GetFPGATimestamp()) {
+							//autoState = ONDEFENSE;
 							timeInitial = Timer::GetFPGATimestamp();
 							drive->ArcadeDrive(0.7, 0.0);
 						} else {
 							DriverStation::ReportError("Didn't find angle from being on top of defense; aborting autonomous");
 							autoState = STOP;
 						}
-					} else if (autoState == ONDEFENSE) {
+
+					}  else if (autoState == ONDEFENSE) {
 						if (timeInitial + 1.25 > Timer::GetFPGATimestamp()) {
 							if (abs(imu->GetAngleY() - initialY) < 2.5) {
 								autoState = PASSEDDEFENSE;
@@ -385,6 +584,7 @@ public:
 							DriverStation::ReportError("Didn't find loss of angle from passing defense; aborting autonomous");
 						}
 					} else if (autoState == PASSEDDEFENSE) {
+
 						if (timeInitial + 2.5 > Timer::GetFPGATimestamp()) {
 							double distance = convertToInches(ultra2->GetVoltage());
 							if (distance > 15 && distance < 30 && timesAuto < 3) {
@@ -399,12 +599,116 @@ public:
 							autoState = STOP;
 							DriverStation::ReportError("Didn't find wall; aborting autonomous");
 						}
-					} else if (autoState == STOP) {
+
+					}  else if (autoState == STOP) {
 						initialY = 0;
 						timeInitial = 0;
 						drive->ArcadeDrive(0.0, 0.0);
 					}
-					*/
+				} else if (autoSelected == autoRamparts) {
+
+					if (timeInitial + 8 > Timer::GetFPGATimestamp()) {
+						double distance = convertToInches(ultra->GetVoltage());
+						if (distance > 15 && distance < 30 && timesAuto < 3) {
+							timesAuto++;
+						} else if (distance > 15 && distance < 30 && timesAuto >= 3) {
+							autoState = STOP;
+							DriverStation::ReportError("Found wall");
+						} else {
+							drive->ArcadeDrive(0.45, 0);
+						}
+					} else {
+						autoState = STOP;
+						DriverStation::ReportError("Didn't find wall; aborting autonomous");
+					}
+
+
+					// good PID's are 0.1, 0, 14.35
+					if (autoState == INITFORWARD && imu->GetAngleY() - initialY < 2.5) {
+
+						if (timeInitial + 4 > Timer::GetFPGATimestamp()) {
+							drive->ArcadeDrive(0.45, 0);
+						} else {
+							DriverStation::ReportError("Couldn't find defense's ramp; aborting autonomous");
+							autoState = STOP;
+						}
+
+					} else if (autoState == INITFORWARD && imu->GetAngleY() - initialY > 2.5) {
+						autoState = FOUNDRAMP;
+						DriverStation::ReportError("Found Ramp");
+						timeInitial = Timer::GetFPGATimestamp();
+					} else if (autoState == FOUNDRAMP) {
+
+						if (driveDistance(5000, 0.1, 0, 14.35) == true) {
+							// finished driving distance
+							autoState = DRIVENBACK;
+							DriverStation::ReportError("Finished Back");
+
+							leftMotorF->SetControlMode(CANSpeedController::kPercentVbus);
+							rightMotorF->SetControlMode(CANSpeedController::kPercentVbus);
+
+							resetMotors();
+							timeInitial = Timer::GetFPGATimestamp();
+						} else {
+							// do nothing - continue driving
+						}
+
+						if (timeInitial + 2 > Timer::GetFPGATimestamp()) {
+							drive->ArcadeDrive(-0.45, 0);
+						} else {
+							DriverStation::ReportError("Finished driving back");
+							timeInitial = Timer::GetFPGATimestamp();
+						}
+					} else if (autoState == DRIVENBACK) {
+
+						if (timeInitial + 3.0 > Timer::GetFPGATimestamp())
+							drive->ArcadeDrive(1.0, 0.0);
+						else {
+							autoState = STOP;
+						}
+						/*
+						else if (timeInitial + 1.25 > Timer::GetFPGATimestamp()) {
+							//autoState = ONDEFENSE;
+							timeInitial = Timer::GetFPGATimestamp();
+							drive->ArcadeDrive(0.7, 0.0);
+						} else {
+							DriverStation::ReportError("Didn't find angle from being on top of defense; aborting autonomous");
+							autoState = STOP;
+						}
+
+					}  else if (autoState == ONDEFENSE) {
+						if (timeInitial + 1.25 > Timer::GetFPGATimestamp()) {
+							if (abs(imu->GetAngleY() - initialY) < 2.5) {
+								autoState = PASSEDDEFENSE;
+							} else {
+								drive->ArcadeDrive(0.7, 0);
+							}
+						} else {
+							autoState = STOP;
+							DriverStation::ReportError("Didn't find loss of angle from passing defense; aborting autonomous");
+						}
+					} else if (autoState == PASSEDDEFENSE) {
+
+						if (timeInitial + 2.5 > Timer::GetFPGATimestamp()) {
+							double distance = convertToInches(ultra2->GetVoltage());
+							if (distance > 15 && distance < 30 && timesAuto < 3) {
+								timesAuto++;
+							} else if (distance > 15 && distance < 30 && timesAuto >= 3) {
+								autoState = STOP;
+								DriverStation::ReportError("Found wall");
+							} else {
+								drive->ArcadeDrive(0.45, 0);
+							}
+						} else {
+							autoState = STOP;
+							DriverStation::ReportError("Didn't find wall; aborting autonomous");
+						}
+
+					}  else if (autoState == STOP) {
+						initialY = 0;
+						timeInitial = 0;
+						drive->ArcadeDrive(0.0, 0.0);
+					}
 				} else if (autoSelected == autoMoat) {
 					if (imu->GetAngleY() - initialY < 3 && autoState == INITFORWARD) {
 
@@ -576,6 +880,7 @@ public:
 						drive->ArcadeDrive(0.0,0.0);
 					}
 				}
+				 */
 				//Wait(0.005);
 			} else {
 				autoInit = false;
@@ -596,16 +901,32 @@ public:
 					teleopInit = true;
 					teleoperatedInit();
 				}
-				if(lastResetTime - Timer::GetFPGATimestamp() >0.1)
+
+				if (Timer::GetFPGATimestamp() - lastResetTime > 0.1)
+				{
 					resetMotors();
+					lastResetTime = Timer::GetFPGATimestamp();
+				}
+				/*
+				if((leftMotorF->GetOutputCurrent() > 40 && rightMotorF->GetOutputCurrent() > 40 ) || !joystickSecond->GetRawButton(10))
+				{
+					if(leftMotorB->GetAnalogInVel()!=0)
+					{
+						leftMotorB->ConfigNeutralMode(CANTalon::kNeutralMode_Coast);
+						rightMotorB->ConfigNeutralMode(CANTalon::kNeutralMode_Coast);
+					}
+					leftMotorB->Disable();
+					rightMotorB->Disable();
+				}
+				*/
 				SmartDashboard::PutNumber("AngleX", imu->GetAngleX());
 				SmartDashboard::PutNumber("AngleY", imu->GetAngleY());
 				SmartDashboard::PutNumber("AngleZ", imu->GetAngleZ());
-				SmartDashboard::PutNumber("Left P", leftMotorF->GetP());
-				SmartDashboard::PutNumber("Left I",leftMotorF->GetI());
-				SmartDashboard::PutNumber("Left D", leftMotorF->GetD());
-				SmartDashboard::PutNumber("Left Encoder", leftMotorF->GetEncPosition());
-				SmartDashboard::PutNumber("Right Encoder", rightMotorF->GetEncPosition());
+				//SmartDashboard::PutNumber("Left P", leftMotorF->GetP());
+				//SmartDashboard::PutNumber("Left I",leftMotorF->GetI());
+				//SmartDashboard::PutNumber("Left D", leftMotorF->GetD());
+				//SmartDashboard::PutNumber("Left Encoder", leftMotorF->GetEncPosition());
+				//SmartDashboard::PutNumber("Right Encoder", rightMotorF->GetEncPosition());
 				SmartDashboard::PutNumber("Left Speed", leftMotorF->GetSpeed());
 				SmartDashboard::PutNumber("Joy Forward", -joystickMain->GetRawAxis(1));
 				SmartDashboard::PutNumber("XRLV Max", ultra->GetVoltage() / 0.00488 / 2.54);
@@ -614,7 +935,24 @@ public:
 				//SmartDashboard::PutNumber("Left Ultra", frontL->GetRangeInches());
 				//SmartDashboard::PutNumber("Right Ultra", frontR->GetRangeInches());
 
-				drive->ArcadeDrive(-joystickMain->GetRawAxis(1), -joystickMain->GetRawAxis(4));
+				// x button on joystick to reverse forward
+				if (joystickMain->GetRawButton(3)) {
+					reverseForward = !reverseForward;
+				}
+
+				float rawTurn = -joystickMain->GetRawAxis(4);
+				// gets out of turning deadzone
+				if (abs(rawTurn) > deadZone) {
+					if (rawTurn > 0)
+						drive->ArcadeDrive(joystickMain->GetRawAxis(1) * (reverseForward ? 1.0 : -1.0),
+										   (rawTurn * turnSlope + verticalShift));
+					else
+						drive->ArcadeDrive(joystickMain->GetRawAxis(1) * (reverseForward ? 1.0 : -1.0),
+										   (rawTurn * turnSlope - verticalShift));
+				} else {
+					// within turning deadzone
+					drive->ArcadeDrive(-joystickMain->GetRawAxis(1), 0);
+				}
 
 				/*
 				float rawForward = -joystickMain->GetRawAxis(1);
@@ -636,21 +974,25 @@ public:
 					leftShooter->Set(1.0);
 					rightShooter->Set(-1.0);
 					indexMotor->Set(0);
+				} else if (joystickMain->GetRawButton(6)) {
+					leftShooter->Set(0.35);
+					rightShooter->Set(-0.35);
 				} else {
 					leftShooter->Set(0);
 					rightShooter->Set(0);
 					indexMotor->Set(0);
 				}
+
 				if (joystickMain->GetRawButton(2)) {
 					indexMotor->Set(0.45);
 				}
 
-				if (joystickMain->GetRawButton(4)) {
+				if (joystickMain->GetRawButton(1)) {
 					//up
 					shooterA->Set(DoubleSolenoid::kReverse);
 					shooterB->Set(DoubleSolenoid::kReverse);
 					wasUp=true;
-				} else if (joystickMain->GetRawButton(1)) {
+				} else if (joystickMain->GetRawButton(4)) {
 					//down
 					shooterA->Set(DoubleSolenoid::kForward);
 					shooterB->Set(DoubleSolenoid::kForward);
@@ -662,9 +1004,9 @@ public:
 				SmartDashboard::PutNumber("X Position", xPosition);
 				SmartDashboard::PutNumber("Y Position", yPosition);
 				if ((joystickSecond->GetRawButton(5) || joystickSecond->GetRawButton(6)) && abs(joystickSecond->GetRawAxis(4)) > 0.2)
-					xPosition += joystickSecond->GetRawAxis(4) / 50.0;
+					xPosition += joystickSecond->GetRawAxis(4) / 80.0;
 				if ((joystickSecond->GetRawButton(5) || joystickSecond->GetRawButton(6)) && abs(joystickSecond->GetRawAxis(1)) > 0.2)
-					yPosition += joystickSecond->GetRawAxis(1) / 50.0;
+					yPosition += joystickSecond->GetRawAxis(1) / 80.0;
 
 				if (joystickSecond->GetRawButton(1)) {
 					// for straight forward
@@ -695,6 +1037,7 @@ public:
 				xServo->Set(xPosition);
 				yServo->Set(yPosition);
 
+				/*
 				if (sock->hasPendingPacket()) {
 					DriverStation::ReportError("Got Packet");
 					SmartDashboard::PutNumber("TimeSince", Timer::GetFPGATimestamp() - timeReceive);
@@ -705,6 +1048,7 @@ public:
 					SmartDashboard::PutNumber("Last", buff[370]);
 					//DriverStation::ReportError((char*)buff);
 				}
+				*/
 			} else {
 				teleopInit = false;
 			}
